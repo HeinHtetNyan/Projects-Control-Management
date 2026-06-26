@@ -74,7 +74,7 @@ export default function SecretsPage() {
                       <div>
                         <p className="text-[#e0e3e5] font-medium">{s.name}</p>
                         {revealed?.id === s.id ? (
-                          <code className="text-xs text-green-400 font-mono break-all">{revealed.value}</code>
+                          <code className="text-xs text-green-400 font-mono break-all">{revealed!.value}</code>
                         ) : (
                           <p className="text-xs text-[#6b7680] font-mono">••••••••</p>
                         )}

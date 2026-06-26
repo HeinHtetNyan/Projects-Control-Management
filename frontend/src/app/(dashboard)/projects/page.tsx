@@ -47,7 +47,7 @@ export default function ProjectsPage() {
         title="Projects"
         description={`${projects.length} project${projects.length !== 1 ? "s" : ""}`}
         action={
-          <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-2">
+          <button onClick={() => { setForm({ name: "", slug: "", description: "", deep_link_scheme: "", type: "", status: "Development", version: "", import_private_key: "" }); setErr(""); setShowCreate(true); }} className="btn-primary flex items-center gap-2">
             <Plus size={16} /> New Project
           </button>
         }

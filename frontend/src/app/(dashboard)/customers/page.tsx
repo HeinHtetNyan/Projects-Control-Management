@@ -105,11 +105,11 @@ export default function CustomersPage() {
               <div><label className="block text-xs text-[#9aa3ab] mb-1">Company</label><input className="field" value={form.company_name} onChange={F("company_name")} /></div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="block text-xs text-[#9aa3ab] mb-1">Email</label><input className="field" type="email" value={form.email} onChange={F("email")} /></div>
-              <div><label className="block text-xs text-[#9aa3ab] mb-1">Phone</label><input className="field" value={form.phone} onChange={F("phone")} /></div>
+              <div><label className="block text-xs text-[#9aa3ab] mb-1">Email <span className="text-[#6b7680]">(optional)</span></label><input className="field" type="email" value={form.email} onChange={F("email")} /></div>
+              <div><label className="block text-xs text-[#9aa3ab] mb-1">Phone <span className="text-[#6b7680]">(optional)</span></label><input className="field" value={form.phone} onChange={F("phone")} /></div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="block text-xs text-[#9aa3ab] mb-1">Country</label><input className="field" value={form.country} onChange={F("country")} /></div>
+              <div><label className="block text-xs text-[#9aa3ab] mb-1">Country <span className="text-[#6b7680]">(optional)</span></label><input className="field" value={form.country} onChange={F("country")} /></div>
               <div><label className="block text-xs text-[#9aa3ab] mb-1">Status</label>
                 <select className="field" value={form.status} onChange={F("status")}><option value="active">active</option><option value="inactive">inactive</option></select>
               </div>
