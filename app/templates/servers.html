@@ -10,7 +10,7 @@
 {% endblock %}
 
 {% block content %}
-<div x-data="{ open: false }">
+<div x-data="{ open: false, editId: null }">
 
   {% if success %}
   <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)"
@@ -102,6 +102,17 @@
             <td class="td"><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
             <td class="td text-right">
               <div class="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {% if s.ssh_host %}
+                <span class="badge" style="background:rgba(52,211,153,0.15); color:#34d399" title="{{ s.ssh_username }}@{{ s.ssh_host }}:{{ s.ssh_port }}">SSH</span>
+                <form method="POST" action="/admin/servers/{{ s.id }}/test-ssh" class="inline">
+                  <button type="submit" class="btn-ghost" style="padding:4px 8px; font-size:12px" title="Test SSH connection">
+                    <span class="msym" style="font-size:14px">wifi_tethering</span>
+                  </button>
+                </form>
+                {% endif %}
+                <button @click="editId = {{ s.id }}" class="btn-ghost" style="padding:4px 8px; font-size:12px" title="Edit">
+                  <span class="msym" style="font-size:14px">edit</span>
+                </button>
                 <form method="POST" action="/admin/servers/{{ s.id }}/update-status" x-data class="inline">
                   <select name="status" onchange="this.form.submit()" class="input" style="width:auto; padding:4px 8px; font-size:12px; background:#272a2c">
                     <option value="running" {% if s.status == 'running' %}selected{% endif %}>Running</option>
@@ -192,6 +203,25 @@
           <label class="label">Notes</label>
           <textarea name="notes" rows="2" placeholder="Optional notes…" class="input"></textarea>
         </div>
+
+        <div class="pt-2" style="border-top:1px solid rgba(255,255,255,0.06)">
+          <label class="label">SSH Access (optional — needed for VPS .env sync)</label>
+          <div class="grid grid-cols-2 gap-3">
+            <input name="ssh_host" placeholder="Host, e.g. 203.0.113.5" class="input font-mono text-xs"/>
+            <input name="ssh_port" type="number" placeholder="Port" value="22" class="input font-mono text-xs"/>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mt-2">
+            <input name="ssh_username" placeholder="SSH username" class="input font-mono text-xs"/>
+            <select name="ssh_key_secret_id" class="input" style="font-size:12px">
+              <option value="">SSH key secret…</option>
+              {% for sec in ssh_key_secrets %}
+              <option value="{{ sec.id }}">{{ sec.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <input name="default_env_path" placeholder="Default .env path" value=".env" class="input font-mono text-xs mt-2"/>
+        </div>
+
         <div class="flex gap-3 pt-1">
           <button type="button" @click="open = false" class="btn-ghost flex-1">Cancel</button>
           <button type="submit" class="btn-primary flex-1">Add Server</button>
@@ -199,6 +229,81 @@
       </form>
     </div>
   </div>
+
+  <!-- Edit Server Modals (one per server) -->
+  {% for s in servers %}
+  <div x-show="editId === {{ s.id }}" x-cloak class="modal-backdrop" @keydown.escape.window="editId = null">
+    <div @click.outside="editId = null" class="modal" style="max-width:520px">
+      <div class="modal-header">
+        <h2 class="text-sm font-semibold text-on-surface">Edit {{ s.name }}</h2>
+        <button @click="editId = null" class="btn-ghost" style="padding:4px 8px; border:none"><span class="msym" style="font-size:18px">close</span></button>
+      </div>
+      <form method="POST" action="/admin/servers/{{ s.id }}/update" class="modal-body space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">Server Name</label>
+            <input name="name" required value="{{ s.name }}" class="input"/>
+          </div>
+          <div>
+            <label class="label">Provider</label>
+            <input name="provider" value="{{ s.provider or '' }}" class="input"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="label">IP Address</label>
+            <input name="ip_address" value="{{ s.ip_address or '' }}" class="input font-mono"/>
+          </div>
+          <div>
+            <label class="label">Operating System</label>
+            <input name="operating_system" value="{{ s.operating_system or '' }}" class="input"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="label">CPU</label>
+            <input name="cpu" value="{{ s.cpu or '' }}" class="input"/>
+          </div>
+          <div>
+            <label class="label">RAM</label>
+            <input name="ram" value="{{ s.ram or '' }}" class="input"/>
+          </div>
+          <div>
+            <label class="label">Storage</label>
+            <input name="storage" value="{{ s.storage or '' }}" class="input"/>
+          </div>
+        </div>
+        <div>
+          <label class="label">Notes</label>
+          <textarea name="notes" rows="2" class="input">{{ s.notes or '' }}</textarea>
+        </div>
+
+        <div class="pt-2" style="border-top:1px solid rgba(255,255,255,0.06)">
+          <label class="label">SSH Access</label>
+          <div class="grid grid-cols-2 gap-3">
+            <input name="ssh_host" value="{{ s.ssh_host or '' }}" placeholder="Host" class="input font-mono text-xs"/>
+            <input name="ssh_port" type="number" value="{{ s.ssh_port or 22 }}" class="input font-mono text-xs"/>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mt-2">
+            <input name="ssh_username" value="{{ s.ssh_username or '' }}" placeholder="SSH username" class="input font-mono text-xs"/>
+            <select name="ssh_key_secret_id" class="input" style="font-size:12px">
+              <option value="">SSH key secret…</option>
+              {% for sec in ssh_key_secrets %}
+              <option value="{{ sec.id }}" {% if s.ssh_key_secret_id == sec.id %}selected{% endif %}>{{ sec.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <input name="default_env_path" value="{{ s.default_env_path or '.env' }}" class="input font-mono text-xs mt-2"/>
+        </div>
+
+        <div class="flex gap-3 pt-1">
+          <button type="button" @click="editId = null" class="btn-ghost flex-1">Cancel</button>
+          <button type="submit" class="btn-primary flex-1">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
 
 </div>
 {% endblock %}

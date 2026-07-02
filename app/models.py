@@ -37,6 +37,13 @@ class Project(Base):
     owner = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    restart_server_id = Column(Integer, ForeignKey("servers.id"), nullable=True)
+    restart_command = Column(Text, nullable=True)
+    restart_dry_run = Column(Boolean, nullable=False, default=True)
+    last_restart_at = Column(DateTime, nullable=True)
+    last_restart_status = Column(String(20), nullable=True)   # success | failed | dry_run
+    last_restart_output = Column(Text, nullable=True)
+
     tokens = relationship("ActivationToken", back_populates="project")
     licenses = relationship("License", back_populates="project")
     deployments = relationship("Deployment", back_populates="project")
@@ -44,6 +51,7 @@ class Project(Base):
     domains = relationship("Domain", back_populates="project")
     integrations = relationship("Integration", back_populates="project")
     notes = relationship("Note", back_populates="project", cascade="all, delete-orphan")
+    restart_server = relationship("Server", foreign_keys=[restart_server_id])
 
 
 class Customer(Base):
@@ -137,6 +145,14 @@ class Server(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    ssh_host = Column(String(255), nullable=True)
+    ssh_port = Column(Integer, nullable=False, default=22)
+    ssh_username = Column(String(100), nullable=True)
+    ssh_key_secret_id = Column(Integer, ForeignKey("secrets.id"), nullable=True)
+    default_env_path = Column(String(500), nullable=True, default=".env")
+
+    ssh_key_secret = relationship("Secret", foreign_keys=[ssh_key_secret_id])
+
 
 class Deployment(Base):
     __tablename__ = "deployments"
@@ -168,9 +184,16 @@ class Secret(Base):
     rotated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    rotation_mode = Column(String(20), nullable=False, default="manual")   # manual | auto | reminder
+    rotation_interval_days = Column(Integer, nullable=True)
+    next_rotation_at = Column(DateTime, nullable=True)
+    last_rotation_status = Column(String(20), nullable=True)              # success | failed | reminder_sent
+    last_rotation_error = Column(Text, nullable=True)
+
     project = relationship("Project", back_populates="secrets")
     versions = relationship("SecretVersion", back_populates="secret", cascade="all, delete-orphan",
                             order_by="SecretVersion.created_at.desc()")
+    vps_targets = relationship("SecretVpsTarget", back_populates="secret", cascade="all, delete-orphan")
 
 
 class SecretVersion(Base):
@@ -183,6 +206,24 @@ class SecretVersion(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     secret = relationship("Secret", back_populates="versions")
+
+
+class SecretVpsTarget(Base):
+    __tablename__ = "secret_vps_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    secret_id = Column(Integer, ForeignKey("secrets.id"), nullable=False)
+    server_id = Column(Integer, ForeignKey("servers.id"), nullable=False)
+    remote_path = Column(String(500), nullable=True)    # overrides server.default_env_path if set
+    remote_key = Column(String(255), nullable=True)     # overrides secret.name if set
+    dry_run = Column(Boolean, nullable=False, default=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    last_sync_status = Column(String(20), nullable=True)   # success | failed | dry_run
+    last_sync_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    secret = relationship("Secret", back_populates="vps_targets")
+    server = relationship("Server")
 
 
 class Domain(Base):

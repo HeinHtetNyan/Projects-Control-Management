@@ -103,7 +103,19 @@ class ProjectOut(BaseModel):
     repository_url: Optional[str] = None
     owner: Optional[str] = None
     created_at: datetime
+    restart_server_id: Optional[int] = None
+    restart_command: Optional[str] = None
+    restart_dry_run: bool = True
+    last_restart_at: Optional[datetime] = None
+    last_restart_status: Optional[str] = None
+    last_restart_output: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectRestartSettings(BaseModel):
+    restart_server_id: Optional[int] = None
+    restart_command: str = ""
+    restart_dry_run: bool = True
 
 
 class ProjectCreate(BaseModel):
@@ -235,6 +247,11 @@ class ServerOut(BaseModel):
     status: str
     notes: Optional[str] = None
     created_at: datetime
+    ssh_host: Optional[str] = None
+    ssh_port: int = 22
+    ssh_username: Optional[str] = None
+    ssh_key_secret_id: Optional[int] = None
+    default_env_path: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -249,6 +266,28 @@ class ServerCreate(BaseModel):
     purpose: str = ""
     status: str = "running"
     notes: str = ""
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_username: str = ""
+    ssh_key_secret_id: Optional[int] = None
+    default_env_path: str = ".env"
+
+
+class ServerUpdate(BaseModel):
+    name: str
+    provider: str = ""
+    ip_address: str = ""
+    cpu: str = ""
+    ram: str = ""
+    storage: str = ""
+    operating_system: str = ""
+    purpose: str = ""
+    notes: str = ""
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_username: str = ""
+    ssh_key_secret_id: Optional[int] = None
+    default_env_path: str = ".env"
 
 
 class ServerUpdateStatus(BaseModel):
@@ -292,6 +331,11 @@ class SecretOut(BaseModel):
     rotated_at: Optional[datetime] = None
     created_at: datetime
     project: Optional[ProjectBrief] = None
+    rotation_mode: str = "manual"
+    rotation_interval_days: Optional[int] = None
+    next_rotation_at: Optional[datetime] = None
+    last_rotation_status: Optional[str] = None
+    last_rotation_error: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -302,10 +346,17 @@ class SecretCreate(BaseModel):
     project_id: Optional[int] = None
     environment: str = ""
     description: str = ""
+    rotation_mode: str = "manual"
+    rotation_interval_days: Optional[int] = None
+
+
+class SecretRotationSettings(BaseModel):
+    rotation_mode: str = "manual"
+    rotation_interval_days: Optional[int] = None
 
 
 class SecretRotate(BaseModel):
-    new_value: str
+    new_value: Optional[str] = None
 
 
 class SecretRevealed(BaseModel):
@@ -320,6 +371,36 @@ class SecretVersionOut(BaseModel):
     rotated_by: Optional[str] = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+# VPS Sync Targets
+
+class VpsTargetOut(BaseModel):
+    id: int
+    secret_id: int
+    server_id: int
+    remote_path: Optional[str] = None
+    remote_key: Optional[str] = None
+    dry_run: bool = True
+    last_synced_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VpsTargetCreate(BaseModel):
+    secret_id: int
+    server_id: int
+    remote_path: str = ""
+    remote_key: str = ""
+    dry_run: bool = True
+
+
+class VpsTargetUpdate(BaseModel):
+    remote_path: str = ""
+    remote_key: str = ""
+    dry_run: bool = True
 
 
 # Domains

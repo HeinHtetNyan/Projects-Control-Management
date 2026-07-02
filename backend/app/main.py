@@ -1,3 +1,7 @@
+import logging
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -7,12 +11,15 @@ from .config import settings
 from .database import engine, Base, SessionLocal
 from .models import AdminUser
 from .auth import hash_password
+from .rotation import run_scheduled_rotation_check
 from .routers import (
     auth, activation, dashboard, projects, customers,
     tokens, licenses, devices, servers, deployments,
     secrets, domains, integrations, notes, users,
-    audit_logs, search, notifications,
+    audit_logs, search, notifications, vps_targets,
 )
+
+logger = logging.getLogger("scheduler")
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -47,6 +54,7 @@ app.include_router(users.router)
 app.include_router(audit_logs.router)
 app.include_router(search.router)
 app.include_router(notifications.router)
+app.include_router(vps_targets.router)
 
 
 def _add_column_if_not_exists(conn, table: str, column: str, col_def: str):
@@ -78,6 +86,25 @@ def on_startup():
         _add_column_if_not_exists(conn, "secrets", "description", "TEXT")
         _add_column_if_not_exists(conn, "servers", "purpose", "VARCHAR(255)")
 
+        _add_column_if_not_exists(conn, "servers", "ssh_host", "VARCHAR(255)")
+        _add_column_if_not_exists(conn, "servers", "ssh_port", "INTEGER NOT NULL DEFAULT 22")
+        _add_column_if_not_exists(conn, "servers", "ssh_username", "VARCHAR(100)")
+        _add_column_if_not_exists(conn, "servers", "ssh_key_secret_id", "INTEGER REFERENCES secrets(id)")
+        _add_column_if_not_exists(conn, "servers", "default_env_path", "VARCHAR(500) DEFAULT '.env'")
+
+        _add_column_if_not_exists(conn, "secrets", "rotation_mode", "VARCHAR(20) NOT NULL DEFAULT 'manual'")
+        _add_column_if_not_exists(conn, "secrets", "rotation_interval_days", "INTEGER")
+        _add_column_if_not_exists(conn, "secrets", "next_rotation_at", "TIMESTAMP")
+        _add_column_if_not_exists(conn, "secrets", "last_rotation_status", "VARCHAR(20)")
+        _add_column_if_not_exists(conn, "secrets", "last_rotation_error", "TEXT")
+
+        _add_column_if_not_exists(conn, "projects", "restart_server_id", "INTEGER REFERENCES servers(id)")
+        _add_column_if_not_exists(conn, "projects", "restart_command", "TEXT")
+        _add_column_if_not_exists(conn, "projects", "restart_dry_run", "BOOLEAN NOT NULL DEFAULT true")
+        _add_column_if_not_exists(conn, "projects", "last_restart_at", "TIMESTAMP")
+        _add_column_if_not_exists(conn, "projects", "last_restart_status", "VARCHAR(20)")
+        _add_column_if_not_exists(conn, "projects", "last_restart_output", "TEXT")
+
     db = SessionLocal()
     try:
         if db.query(AdminUser).count() == 0 and settings.ADMIN_PASSWORD not in ("admin", "changeme"):
@@ -90,6 +117,37 @@ def on_startup():
             db.commit()
     finally:
         db.close()
+
+
+scheduler = BackgroundScheduler()
+
+
+def _scheduled_rotation_job():
+    db = SessionLocal()
+    try:
+        run_scheduled_rotation_check(db)
+    except Exception:
+        logger.exception("scheduled rotation check failed")
+    finally:
+        db.close()
+
+
+@app.on_event("startup")
+def start_scheduler():
+    if settings.ENABLE_SCHEDULER:
+        scheduler.add_job(
+            _scheduled_rotation_job,
+            IntervalTrigger(minutes=settings.ROTATION_CHECK_INTERVAL_MINUTES),
+            id="rotation_check",
+            replace_existing=True,
+        )
+        scheduler.start()
+
+
+@app.on_event("shutdown")
+def stop_scheduler():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
 
 @app.get("/", include_in_schema=False)

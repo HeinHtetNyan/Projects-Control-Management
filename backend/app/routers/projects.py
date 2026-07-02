@@ -6,8 +6,10 @@ from ..models import Project, AdminUser
 from ..auth import get_current_user, log_action, get_client_ip
 from ..crypto import generate_key_pair, derive_public_key, encrypt_private_key
 from ..config import settings
+from ..rotation import restart_project
 from ..schemas import (
-    ProjectOut, ProjectCreate, ProjectUpdate, ReimportKeyRequest, MessageResponse,
+    ProjectOut, ProjectCreate, ProjectUpdate, ProjectRestartSettings,
+    ReimportKeyRequest, MessageResponse,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -119,6 +121,45 @@ async def reimport_key(
         db.refresh(project)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Key import failed: {str(e)[:80]}")
+    return project
+
+
+@router.patch("/{project_id}/restart-settings", response_model=ProjectOut)
+async def update_restart_settings(
+    project_id: int,
+    body: ProjectRestartSettings,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user),
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.restart_server_id = body.restart_server_id
+    project.restart_command = body.restart_command.strip() or None
+    project.restart_dry_run = body.restart_dry_run
+    log_action(db, current_user, "update_restart_settings", get_client_ip(request), "project", project_id, project.name)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.post("/{project_id}/restart", response_model=ProjectOut)
+async def do_restart_project(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_user),
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = restart_project(db, project)
+    log_action(db, current_user, "restart_project", get_client_ip(request), "project", project_id, project.name, {"status": result["status"]})
+    db.commit()
+    db.refresh(project)
+    if result["status"] == "failed":
+        raise HTTPException(status_code=400, detail=f"Restart failed: {result['output'][:200]}")
     return project
 
 

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     BASE_URL: str = "http://localhost:8001"
     APP_NAME: str = "Saw Yun License Server"
     CORS_ORIGINS: str = "http://localhost:3000"
+    ENABLE_SCHEDULER: bool = True
+    ROTATION_CHECK_INTERVAL_MINUTES: int = 1440
 
     @property
     def cors_origins_list(self) -> list[str]:

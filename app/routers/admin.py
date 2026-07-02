@@ -13,7 +13,7 @@ from typing import Optional
 from ..database import get_db
 from ..models import (
     AdminUser, Project, Customer, ActivationToken, License,
-    Device, Server, Deployment, Secret, SecretVersion,
+    Device, Server, Deployment, Secret, SecretVersion, SecretVpsTarget,
     Domain, Integration, Note, AuditLog, Notification,
 )
 from ..crypto import (
@@ -23,6 +23,11 @@ from ..crypto import (
 from ..auth import hash_password, verify_password, require_login, login_redirect
 from ..templates_config import templates
 from ..config import settings
+from .. import ssh_sync
+from ..rotation import (
+    generate_random_value, rotate_secret_core, push_secret_to_targets,
+    push_to_single_target, compute_next_rotation, restart_project,
+)
 
 router = APIRouter(prefix="/admin")
 
@@ -249,12 +254,65 @@ async def project_detail(
         .order_by(ActivationToken.created_at.desc())
         .limit(20).all()
     )
+    project_secrets = (
+        db.query(Secret)
+        .filter(Secret.project_id == project_id)
+        .order_by(Secret.created_at.desc())
+        .all()
+    )
+    servers = db.query(Server).order_by(Server.name).all()
     return templates.TemplateResponse(
         request, "project_detail.html",
         {**_ctx(request, db), "active_page": "projects",
-         "project": project, "tokens": tokens,
-         "success": success, "error": error},
+         "project": project, "tokens": tokens, "project_secrets": project_secrets,
+         "servers": servers, "success": success, "error": error},
     )
+
+
+@router.post("/projects/{project_id}/restart-settings")
+async def project_restart_settings(
+    project_id: int,
+    request: Request,
+    restart_server_id: str = Form(""),
+    restart_command: str = Form(""),
+    go_live: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return RedirectResponse("/admin/projects?error=Project+not+found", status_code=302)
+    project.restart_server_id = int(restart_server_id) if restart_server_id.strip() else None
+    project.restart_command = restart_command.strip() or None
+    project.restart_dry_run = (go_live != "on")
+    _log(db, request, user, "update_restart_settings", "project", project_id, project.name)
+    db.commit()
+    return RedirectResponse(f"/admin/projects/{project_id}?success=Restart+settings+saved", status_code=302)
+
+
+@router.post("/projects/{project_id}/restart")
+async def project_restart(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return RedirectResponse("/admin/projects?error=Project+not+found", status_code=302)
+    result = restart_project(db, project)
+    _log(db, request, user, "restart_project", "project", project_id, project.name, {"status": result["status"]})
+    db.commit()
+    if result["status"] == "failed":
+        return RedirectResponse(
+            f"/admin/projects/{project_id}?error=Restart+failed:+{result['output'][:100]}", status_code=302
+        )
+    label = "Dry-run" if result["status"] == "dry_run" else "Restart"
+    return RedirectResponse(f"/admin/projects/{project_id}?success={label}+completed", status_code=302)
 
 
 @router.post("/projects/{project_id}/update")
@@ -637,10 +695,12 @@ async def servers_list(
     if redir:
         return redir
     servers = db.query(Server).order_by(Server.created_at.desc()).all()
+    ssh_key_secrets = db.query(Secret).order_by(Secret.name).all()
     return templates.TemplateResponse(
         request, "servers.html",
         {**_ctx(request, db), "active_page": "servers",
-         "servers": servers, "success": success, "error": error},
+         "servers": servers, "ssh_key_secrets": ssh_key_secrets,
+         "success": success, "error": error},
     )
 
 
@@ -656,6 +716,11 @@ async def server_create(
     operating_system: str = Form(""),
     status: str = Form("running"),
     notes: str = Form(""),
+    ssh_host: str = Form(""),
+    ssh_port: str = Form("22"),
+    ssh_username: str = Form(""),
+    ssh_key_secret_id: str = Form(""),
+    default_env_path: str = Form(".env"),
     db: Session = Depends(get_db),
 ):
     user, redir = _guard(request, db)
@@ -671,12 +736,86 @@ async def server_create(
         operating_system=operating_system.strip() or None,
         status=status.strip(),
         notes=notes.strip() or None,
+        ssh_host=ssh_host.strip() or None,
+        ssh_port=int(ssh_port) if ssh_port.strip() else 22,
+        ssh_username=ssh_username.strip() or None,
+        ssh_key_secret_id=int(ssh_key_secret_id) if ssh_key_secret_id.strip() else None,
+        default_env_path=default_env_path.strip() or ".env",
     )
     db.add(server)
     db.flush()
     _log(db, request, user, "create_server", "server", server.id, server.name)
     db.commit()
     return RedirectResponse("/admin/servers?success=Server+added", status_code=302)
+
+
+@router.post("/servers/{server_id}/update")
+async def server_update(
+    server_id: int,
+    request: Request,
+    name: str = Form(...),
+    provider: str = Form(""),
+    ip_address: str = Form(""),
+    cpu: str = Form(""),
+    ram: str = Form(""),
+    storage: str = Form(""),
+    operating_system: str = Form(""),
+    notes: str = Form(""),
+    ssh_host: str = Form(""),
+    ssh_port: str = Form("22"),
+    ssh_username: str = Form(""),
+    ssh_key_secret_id: str = Form(""),
+    default_env_path: str = Form(".env"),
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        return RedirectResponse("/admin/servers?error=Server+not+found", status_code=302)
+    server.name = name.strip()
+    server.provider = provider.strip() or None
+    server.ip_address = ip_address.strip() or None
+    server.cpu = cpu.strip() or None
+    server.ram = ram.strip() or None
+    server.storage = storage.strip() or None
+    server.operating_system = operating_system.strip() or None
+    server.notes = notes.strip() or None
+    server.ssh_host = ssh_host.strip() or None
+    server.ssh_port = int(ssh_port) if ssh_port.strip() else 22
+    server.ssh_username = ssh_username.strip() or None
+    server.ssh_key_secret_id = int(ssh_key_secret_id) if ssh_key_secret_id.strip() else None
+    server.default_env_path = default_env_path.strip() or ".env"
+    _log(db, request, user, "update_server", "server", server_id, server.name)
+    db.commit()
+    return RedirectResponse("/admin/servers?success=Server+updated", status_code=302)
+
+
+@router.post("/servers/{server_id}/test-ssh")
+async def server_test_ssh(
+    server_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        return RedirectResponse("/admin/servers?error=Server+not+found", status_code=302)
+    try:
+        if not server.ssh_host or not server.ssh_username or not server.ssh_key_secret_id:
+            raise ssh_sync.SSHSyncError("Server is missing SSH connection details")
+        if not server.ssh_key_secret:
+            raise ssh_sync.SSHSyncError("Linked SSH key secret was not found")
+        private_key_pem = decrypt_private_key(server.ssh_key_secret.encrypted_value)
+        ssh_sync.test_connection(server.ssh_host, server.ssh_port or 22, server.ssh_username, private_key_pem)
+        _log(db, request, user, "test_server_ssh", "server", server_id, server.name)
+        db.commit()
+    except Exception as e:
+        return RedirectResponse(f"/admin/servers?error=Connection+failed:+{str(e)[:80]}", status_code=302)
+    return RedirectResponse("/admin/servers?success=Connection+OK", status_code=302)
 
 
 @router.post("/servers/{server_id}/update-status")
@@ -802,10 +941,11 @@ async def secrets_list(
         return redir
     secret_list = db.query(Secret).order_by(Secret.created_at.desc()).all()
     projects = db.query(Project).order_by(Project.name).all()
+    servers = db.query(Server).order_by(Server.name).all()
     return templates.TemplateResponse(
         request, "secrets.html",
         {**_ctx(request, db), "active_page": "secrets",
-         "secrets": secret_list, "projects": projects,
+         "secrets": secret_list, "projects": projects, "servers": servers,
          "success": success, "error": error},
     )
 
@@ -817,6 +957,8 @@ async def secret_create(
     category: str = Form(...),
     value: str = Form(...),
     project_id: str = Form(""),
+    rotation_mode: str = Form("manual"),
+    rotation_interval_days: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user, redir = _guard(request, db)
@@ -829,12 +971,18 @@ async def secret_create(
     except Exception as e:
         return RedirectResponse(f"/admin/secrets?error=Encryption+failed:+{str(e)[:60]}", status_code=302)
     pid = int(project_id) if project_id.strip() else None
+    interval = int(rotation_interval_days) if rotation_interval_days.strip() else None
+    mode = rotation_mode.strip() if rotation_mode.strip() in ("manual", "auto", "reminder") else "manual"
+    next_rotation = compute_next_rotation(interval, datetime.utcnow()) if (mode != "manual" and interval) else None
     secret = Secret(
         name=name.strip(),
         category=category.strip(),
         encrypted_value=encrypted,
         project_id=pid,
         created_by=user.username,
+        rotation_mode=mode,
+        rotation_interval_days=interval,
+        next_rotation_at=next_rotation,
     )
     db.add(secret)
     db.flush()
@@ -842,6 +990,33 @@ async def secret_create(
          {"category": category})
     db.commit()
     return RedirectResponse("/admin/secrets?success=Secret+stored", status_code=302)
+
+
+@router.post("/secrets/{secret_id}/rotation-settings")
+async def secret_rotation_settings(
+    secret_id: int,
+    request: Request,
+    rotation_mode: str = Form("manual"),
+    rotation_interval_days: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    secret = db.query(Secret).filter(Secret.id == secret_id).first()
+    if not secret:
+        return RedirectResponse("/admin/secrets?error=Secret+not+found", status_code=302)
+    mode = rotation_mode.strip() if rotation_mode.strip() in ("manual", "auto", "reminder") else "manual"
+    interval = int(rotation_interval_days) if rotation_interval_days.strip() else None
+    secret.rotation_mode = mode
+    secret.rotation_interval_days = interval
+    secret.next_rotation_at = (
+        compute_next_rotation(interval, datetime.utcnow()) if (mode != "manual" and interval) else None
+    )
+    _log(db, request, user, "update_secret_rotation_settings", "secret", secret_id, secret.name,
+         {"rotation_mode": mode, "rotation_interval_days": interval})
+    db.commit()
+    return RedirectResponse("/admin/secrets?success=Rotation+settings+updated", status_code=302)
 
 
 @router.post("/secrets/{secret_id}/reveal")
@@ -869,6 +1044,7 @@ async def secret_reveal(
             "active_page": "secrets",
             "secrets": db.query(Secret).order_by(Secret.created_at.desc()).all(),
             "projects": db.query(Project).order_by(Project.name).all(),
+            "servers": db.query(Server).order_by(Server.name).all(),
             "revealed_id": secret_id,
             "revealed_value": plaintext,
             "success": "",
@@ -881,7 +1057,7 @@ async def secret_reveal(
 async def secret_rotate(
     secret_id: int,
     request: Request,
-    new_value: str = Form(...),
+    new_value: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user, redir = _guard(request, db)
@@ -890,20 +1066,31 @@ async def secret_rotate(
     secret = db.query(Secret).filter(Secret.id == secret_id).first()
     if not secret:
         return RedirectResponse("/admin/secrets?error=Secret+not+found", status_code=302)
+    value = new_value.strip()
+    if not value:
+        if secret.rotation_mode != "auto":
+            return RedirectResponse(
+                "/admin/secrets?error=A+new+value+is+required+for+manual/reminder+secrets",
+                status_code=302,
+            )
+        value = generate_random_value()
     try:
-        # Save current value as a version before overwriting
-        db.add(SecretVersion(
-            secret_id=secret_id,
-            encrypted_value=secret.encrypted_value,
-            rotated_by=user.username,
-        ))
-        secret.encrypted_value = encrypt_private_key(new_value.strip())
-        secret.rotated_at = datetime.utcnow()
+        rotate_secret_core(db, secret, value, actor_name=user.username)
+        push_results = push_secret_to_targets(db, secret, value)
+        secret.last_rotation_status = "success"
+        secret.last_rotation_error = None
         _log(db, request, user, "rotate_secret", "secret", secret_id, secret.name)
         db.commit()
     except Exception as e:
+        db.rollback()
         return RedirectResponse(f"/admin/secrets?error=Rotation+failed:+{str(e)[:60]}", status_code=302)
-    return RedirectResponse("/admin/secrets?success=Secret+rotated", status_code=302)
+    failed = [r for r in push_results if r.get("status") == "failed"]
+    msg = "Secret+rotated"
+    if push_results:
+        msg += f"+%C2%B7+{len(push_results) - len(failed)}+target(s)+pushed"
+        if failed:
+            msg += f"%2C+{len(failed)}+failed"
+    return RedirectResponse(f"/admin/secrets?success={msg}", status_code=302)
 
 
 @router.post("/secrets/{secret_id}/delete")
@@ -917,10 +1104,120 @@ async def secret_delete(
         return redir
     secret = db.query(Secret).filter(Secret.id == secret_id).first()
     if secret:
+        blocking = db.query(Server).filter(Server.ssh_key_secret_id == secret_id).first()
+        if blocking:
+            return RedirectResponse(
+                f"/admin/secrets?error=Secret+is+used+as+the+SSH+key+for+server+'{blocking.name}'+-+unlink+it+first",
+                status_code=302,
+            )
         _log(db, request, user, "delete_secret", "secret", secret_id, secret.name)
         db.delete(secret)
         db.commit()
     return RedirectResponse("/admin/secrets?success=Secret+deleted", status_code=302)
+
+
+# VPS Sync Targets
+
+@router.post("/secrets/{secret_id}/targets/create")
+async def secret_target_create(
+    secret_id: int,
+    request: Request,
+    server_id: int = Form(...),
+    remote_path: str = Form(""),
+    remote_key: str = Form(""),
+    go_live: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    secret = db.query(Secret).filter(Secret.id == secret_id).first()
+    if not secret:
+        return RedirectResponse("/admin/secrets?error=Secret+not+found", status_code=302)
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        return RedirectResponse("/admin/secrets?error=Server+not+found", status_code=302)
+    target = SecretVpsTarget(
+        secret_id=secret_id,
+        server_id=server_id,
+        remote_path=remote_path.strip() or None,
+        remote_key=remote_key.strip() or None,
+        dry_run=(go_live != "on"),
+    )
+    db.add(target)
+    db.flush()
+    _log(db, request, user, "create_vps_target", "secret", secret_id, secret.name,
+         {"server": server.name})
+    db.commit()
+    return RedirectResponse("/admin/secrets?success=VPS+target+added", status_code=302)
+
+
+@router.post("/vps-targets/{target_id}/delete")
+async def vps_target_delete(
+    target_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    target = db.query(SecretVpsTarget).filter(SecretVpsTarget.id == target_id).first()
+    if target:
+        _log(db, request, user, "delete_vps_target", "secret", target.secret_id)
+        db.delete(target)
+        db.commit()
+    return RedirectResponse("/admin/secrets?success=VPS+target+removed", status_code=302)
+
+
+@router.post("/vps-targets/{target_id}/push")
+async def vps_target_push(
+    target_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    target = db.query(SecretVpsTarget).filter(SecretVpsTarget.id == target_id).first()
+    if not target:
+        return RedirectResponse("/admin/secrets?error=Target+not+found", status_code=302)
+    secret = target.secret
+    try:
+        plaintext = decrypt_private_key(secret.encrypted_value)
+        result = push_to_single_target(target, secret.name, plaintext)
+        _log(db, request, user, "push_vps_target", "secret", secret.id, secret.name)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return RedirectResponse(f"/admin/secrets?error=Push+failed:+{str(e)[:80]}", status_code=302)
+    if result.get("status") == "failed":
+        return RedirectResponse(f"/admin/secrets?error=Push+failed:+{str(result.get('detail'))[:80]}", status_code=302)
+    return RedirectResponse("/admin/secrets?success=Pushed+to+server", status_code=302)
+
+
+@router.post("/vps-targets/{target_id}/test")
+async def vps_target_test(
+    target_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, redir = _guard(request, db)
+    if redir:
+        return redir
+    target = db.query(SecretVpsTarget).filter(SecretVpsTarget.id == target_id).first()
+    if not target or not target.server:
+        return RedirectResponse("/admin/secrets?error=Target+not+found", status_code=302)
+    server = target.server
+    try:
+        if not server.ssh_host or not server.ssh_username or not server.ssh_key_secret_id:
+            raise ssh_sync.SSHSyncError("Server is missing SSH connection details")
+        private_key_pem = decrypt_private_key(server.ssh_key_secret.encrypted_value)
+        ssh_sync.test_connection(server.ssh_host, server.ssh_port or 22, server.ssh_username, private_key_pem)
+        _log(db, request, user, "test_vps_target", "server", server.id, server.name)
+        db.commit()
+    except Exception as e:
+        return RedirectResponse(f"/admin/secrets?error=Connection+failed:+{str(e)[:80]}", status_code=302)
+    return RedirectResponse("/admin/secrets?success=Connection+OK", status_code=302)
 
 
 # Audit Logs

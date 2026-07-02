@@ -55,6 +55,25 @@ def on_startup():
 
         # servers
         _add_column_if_not_exists(conn, "servers", "purpose", "VARCHAR(255)")
+        _add_column_if_not_exists(conn, "servers", "ssh_host", "VARCHAR(255)")
+        _add_column_if_not_exists(conn, "servers", "ssh_port", "INTEGER NOT NULL DEFAULT 22")
+        _add_column_if_not_exists(conn, "servers", "ssh_username", "VARCHAR(100)")
+        _add_column_if_not_exists(conn, "servers", "ssh_key_secret_id", "INTEGER REFERENCES secrets(id)")
+        _add_column_if_not_exists(conn, "servers", "default_env_path", "VARCHAR(500) DEFAULT '.env'")
+
+        # secrets — rotation
+        _add_column_if_not_exists(conn, "secrets", "rotation_mode", "VARCHAR(20) NOT NULL DEFAULT 'manual'")
+        _add_column_if_not_exists(conn, "secrets", "rotation_interval_days", "INTEGER")
+        _add_column_if_not_exists(conn, "secrets", "next_rotation_at", "TIMESTAMP")
+        _add_column_if_not_exists(conn, "secrets", "last_rotation_status", "VARCHAR(20)")
+        _add_column_if_not_exists(conn, "secrets", "last_rotation_error", "TEXT")
+
+        _add_column_if_not_exists(conn, "projects", "restart_server_id", "INTEGER REFERENCES servers(id)")
+        _add_column_if_not_exists(conn, "projects", "restart_command", "TEXT")
+        _add_column_if_not_exists(conn, "projects", "restart_dry_run", "BOOLEAN NOT NULL DEFAULT true")
+        _add_column_if_not_exists(conn, "projects", "last_restart_at", "TIMESTAMP")
+        _add_column_if_not_exists(conn, "projects", "last_restart_status", "VARCHAR(20)")
+        _add_column_if_not_exists(conn, "projects", "last_restart_output", "TEXT")
 
     # Bootstrap first admin user
     db = SessionLocal()

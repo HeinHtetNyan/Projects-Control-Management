@@ -7,7 +7,7 @@ import { api, getErrorMessage } from "@/lib/api";
 import Topbar from "@/components/layout/Topbar";
 import Badge from "@/components/ui/Badge";
 import Modal from "@/components/ui/Modal";
-import { ArrowLeft, Key, Edit3, RefreshCw, Copy, Check } from "lucide-react";
+import { ArrowLeft, Key, Edit3, RefreshCw, Copy, Check, RotateCw, Settings } from "lucide-react";
 import { format } from "date-fns";
 
 export default function ProjectDetailPage() {
@@ -16,9 +16,12 @@ export default function ProjectDetailPage() {
   const qc = useQueryClient();
   const [showEdit, setShowEdit] = useState(false);
   const [showReimport, setShowReimport] = useState(false);
+  const [showRestartSettings, setShowRestartSettings] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", description: "", type: "", status: "", version: "" });
+  const [restartForm, setRestartForm] = useState({ restart_server_id: "", restart_command: "", go_live: false });
   const [privateKey, setPrivateKey] = useState("");
   const [err, setErr] = useState("");
+  const [restartErr, setRestartErr] = useState("");
   const [copied, setCopied] = useState(false);
 
   const { data: project, isLoading } = useQuery({
@@ -31,6 +34,35 @@ export default function ProjectDetailPage() {
     queryFn: () => api.get("/api/tokens").then((r) => r.data),
     select: (data: any[]) => data.filter((t) => t.project_id === Number(id)),
   });
+
+  const { data: servers = [] } = useQuery({ queryKey: ["servers"], queryFn: () => api.get("/api/servers").then((r) => r.data) });
+
+  const restartSettingsMut = useMutation({
+    mutationFn: (body: typeof restartForm) => api.patch(`/api/projects/${id}/restart-settings`, {
+      restart_server_id: body.restart_server_id ? Number(body.restart_server_id) : null,
+      restart_command: body.restart_command,
+      restart_dry_run: !body.go_live,
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["project", id] }); setShowRestartSettings(false); },
+    onError: (e) => setRestartErr(getErrorMessage(e)),
+  });
+
+  const restartMut = useMutation({
+    mutationFn: () => api.post(`/api/projects/${id}/restart`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["project", id] }),
+    onError: (e) => { alert(getErrorMessage(e)); qc.invalidateQueries({ queryKey: ["project", id] }); },
+  });
+
+  function openRestartSettings() {
+    if (!project) return;
+    setRestartForm({
+      restart_server_id: project.restart_server_id ? String(project.restart_server_id) : "",
+      restart_command: project.restart_command || "",
+      go_live: !project.restart_dry_run,
+    });
+    setRestartErr("");
+    setShowRestartSettings(true);
+  }
 
   const updateMut = useMutation({
     mutationFn: (body: typeof editForm) => api.put(`/api/projects/${id}`, body),
@@ -112,6 +144,39 @@ export default function ProjectDetailPage() {
           </div>
         </div>
 
+        {/* Restart */}
+        <div className="bg-[#1d2022] border border-[#2a2f32] rounded-xl p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-[#e0e3e5]">Restart</h2>
+            <button onClick={openRestartSettings} className="btn-ghost flex items-center gap-1.5 text-xs"><Settings size={13} /> Configure</button>
+          </div>
+          {project.restart_server_id && project.restart_command ? (
+            <>
+              <p className="text-xs text-[#9aa3ab] font-mono truncate" title={project.restart_command}>{project.restart_command}</p>
+              <div className="flex items-center gap-2">
+                <Badge value={project.restart_dry_run ? "dry_run" : "live"} />
+                {project.last_restart_status && (
+                  <span className="text-[11px] text-[#6b7680]">
+                    last: {project.last_restart_status}{project.last_restart_at && ` · ${format(new Date(project.last_restart_at), "MMM d HH:mm")}`}
+                  </span>
+                )}
+              </div>
+              {project.last_restart_output && (
+                <pre className="text-[10px] text-[#9aa3ab] bg-[#101415] border border-[#2a2f32] rounded p-2 overflow-x-auto max-h-24">{project.last_restart_output.slice(0, 500)}</pre>
+              )}
+              <button
+                onClick={() => { if (!project.restart_dry_run && !confirm("This will restart the live service. Continue?")) return; restartMut.mutate(); }}
+                disabled={restartMut.isPending}
+                className="btn-primary w-full flex items-center justify-center gap-2"
+              >
+                <RotateCw size={14} /> {restartMut.isPending ? "Restarting…" : project.restart_dry_run ? "Dry Run Restart" : "Restart Now"}
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-[#6b7680]">No restart command configured yet.</p>
+          )}
+        </div>
+
         {/* Tokens */}
         <div className="bg-[#1d2022] border border-[#2a2f32] rounded-xl overflow-hidden">
           <div className="px-5 py-4 border-b border-[#2a2f32] flex items-center justify-between">
@@ -180,6 +245,36 @@ export default function ProjectDetailPage() {
             <button onClick={() => setShowReimport(false)} className="btn-ghost">Cancel</button>
             <button onClick={() => reimportMut.mutate()} disabled={reimportMut.isPending || !privateKey.trim()} className="btn-primary">
               {reimportMut.isPending ? "Updating…" : "Update Key"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Restart Settings Modal */}
+      <Modal title="Restart Settings" open={showRestartSettings} onClose={() => setShowRestartSettings(false)}>
+        {restartErr && <p className="mb-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{restartErr}</p>}
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-[#9aa3ab] mb-1">Server</label>
+            <select className="field" value={restartForm.restart_server_id} onChange={(e) => setRestartForm((f) => ({ ...f, restart_server_id: e.target.value }))}>
+              <option value="">Select server…</option>
+              {servers.map((s: any) => <option key={s.id} value={s.id}>{s.name}{!s.ssh_host ? " (no SSH configured)" : ""}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-[#9aa3ab] mb-1">Restart Command</label>
+            <textarea className="field font-mono text-xs resize-none" rows={2} value={restartForm.restart_command}
+              onChange={(e) => setRestartForm((f) => ({ ...f, restart_command: e.target.value }))}
+              placeholder="e.g. cd /opt/myapp && docker compose restart api" />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-[#9aa3ab]">
+            <input type="checkbox" checked={restartForm.go_live} onChange={(e) => setRestartForm((f) => ({ ...f, go_live: e.target.checked }))} />
+            Go live now (unchecked = dry run, safe default — logs the command instead of running it)
+          </label>
+          <div className="flex justify-end gap-3 pt-2">
+            <button onClick={() => setShowRestartSettings(false)} className="btn-ghost">Cancel</button>
+            <button onClick={() => restartSettingsMut.mutate(restartForm)} disabled={restartSettingsMut.isPending} className="btn-primary">
+              {restartSettingsMut.isPending ? "Saving…" : "Save"}
             </button>
           </div>
         </div>

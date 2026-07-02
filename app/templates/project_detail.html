@@ -3,7 +3,7 @@
 {% block page_title %}{{ project.name }}{% endblock %}
 
 {% block content %}
-<div x-data="{ importOpen: false, editOpen: false, copied: false }">
+<div x-data="{ importOpen: false, editOpen: false, copied: false, restartSettingsOpen: false }">
 
   {% if success %}
   <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)"
@@ -114,6 +114,71 @@
           </button>
         </form>
       </div>
+
+      <!-- Secrets & VPS sync -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="label" style="margin:0">Secrets & .env Sync ({{ project_secrets|length }})</h2>
+          <a href="/admin/secrets" class="text-xs text-primary hover:underline">Vault →</a>
+        </div>
+        {% if project_secrets %}
+        <div class="space-y-2">
+          {% for s in project_secrets %}
+          <a href="/admin/secrets" class="block p-2.5 rounded-lg hover:bg-[#272a2c] transition-colors" style="background:#191c1e; border:1px solid rgba(255,255,255,0.05)">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-mono text-xs text-on-surface truncate">{{ s.name }}</span>
+              <span class="badge badge-development" style="flex-shrink:0">{{ s.category }}</span>
+            </div>
+            <div class="flex items-center gap-2 mt-1 text-[11px] text-outline">
+              {% if s.rotation_mode == 'auto' %}<span style="color:#34d399">Auto-rotates</span>
+              {% elif s.rotation_mode == 'reminder' %}<span style="color:#fbbf24">Reminder</span>
+              {% else %}<span>Manual</span>{% endif %}
+              <span>· {{ s.vps_targets|length }} VPS target{{ 's' if s.vps_targets|length != 1 else '' }}</span>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-xs text-on-surface-variant">No secrets linked to this project yet. Store one from the Vault and assign it to this project.</p>
+        {% endif %}
+      </div>
+
+      <!-- Restart -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="label" style="margin:0">Restart</h2>
+          <button @click="restartSettingsOpen = true" class="btn-ghost" style="padding:4px 10px; font-size:12px">
+            <span class="msym" style="font-size:14px">settings</span> Configure
+          </button>
+        </div>
+        {% if project.restart_server_id and project.restart_command %}
+        <p class="text-xs text-on-surface-variant font-mono mb-2 truncate" title="{{ project.restart_command }}">{{ project.restart_command }}</p>
+        <div class="flex items-center gap-2 mb-3">
+          {% if project.restart_dry_run %}
+          <span class="badge" style="background:rgba(251,191,36,0.15); color:#fbbf24">Dry Run</span>
+          {% else %}
+          <span class="badge" style="background:rgba(255,180,171,0.15); color:#ffb4ab">Live</span>
+          {% endif %}
+          {% if project.last_restart_status %}
+          <span class="text-[11px] text-outline">
+            last: {{ project.last_restart_status }}{% if project.last_restart_at %} · {{ project.last_restart_at.strftime('%b %d %H:%M') }}{% endif %}
+          </span>
+          {% endif %}
+        </div>
+        {% if project.last_restart_output %}
+        <pre class="text-[10px] text-on-surface-variant p-2 rounded mb-3 overflow-x-auto" style="background:#191c1e; border:1px solid rgba(255,255,255,0.05); max-height:100px">{{ project.last_restart_output[:500] }}</pre>
+        {% endif %}
+        <form method="POST" action="/admin/projects/{{ project.id }}/restart"
+              x-data @submit.prevent="if({{ 'true' if project.restart_dry_run else 'false' }} || confirm('This will restart the live service. Continue?')) $el.submit()">
+          <button type="submit" class="btn-primary w-full">
+            <span class="msym" style="font-size:16px">restart_alt</span>
+            {{ 'Dry Run Restart' if project.restart_dry_run else 'Restart Now' }}
+          </button>
+        </form>
+        {% else %}
+        <p class="text-xs text-on-surface-variant">No restart command configured yet.</p>
+        {% endif %}
+      </div>
     </div>
 
     <!-- Right column: tokens -->
@@ -220,6 +285,39 @@
         <div class="flex gap-3">
           <button type="button" @click="editOpen = false" class="btn-ghost flex-1">Cancel</button>
           <button type="submit" class="btn-primary flex-1">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Restart Settings Modal -->
+  <div x-show="restartSettingsOpen" x-cloak class="modal-backdrop" @keydown.escape.window="restartSettingsOpen = false">
+    <div @click.outside="restartSettingsOpen = false" class="modal">
+      <div class="modal-header">
+        <h2 class="text-sm font-semibold text-on-surface">Restart Settings</h2>
+        <button @click="restartSettingsOpen = false" class="btn-ghost" style="padding:4px 8px; border:none"><span class="msym" style="font-size:18px">close</span></button>
+      </div>
+      <form method="POST" action="/admin/projects/{{ project.id }}/restart-settings" class="modal-body space-y-3">
+        <div>
+          <label class="label">Server</label>
+          <select name="restart_server_id" class="input">
+            <option value="">Select server…</option>
+            {% for srv in servers %}
+            <option value="{{ srv.id }}" {% if project.restart_server_id == srv.id %}selected{% endif %}>{{ srv.name }}{% if not srv.ssh_host %} (no SSH configured){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="label">Restart Command</label>
+          <textarea name="restart_command" rows="2" placeholder="e.g. cd /opt/myapp && docker compose restart api" class="input font-mono text-xs">{{ project.restart_command or '' }}</textarea>
+        </div>
+        <label class="flex items-center gap-2 text-xs text-on-surface-variant">
+          <input type="checkbox" name="go_live" {% if not project.restart_dry_run %}checked{% endif %}/>
+          Go live now (unchecked = dry run, safe default — logs the command instead of running it)
+        </label>
+        <div class="flex gap-3 pt-1">
+          <button type="button" @click="restartSettingsOpen = false" class="btn-ghost flex-1">Cancel</button>
+          <button type="submit" class="btn-primary flex-1">Save</button>
         </div>
       </form>
     </div>
